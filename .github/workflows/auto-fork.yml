@@ -1,42 +1,39 @@
-name: Auto Fork & Sync Student Repos
+name: Auto Fork Student Repos
 
 on:
   issues:
-    types: [opened, edited]   # when student submits repo link
+    types: [opened]
+  workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"    # sync all forks every 10 minutes
-  workflow_dispatch:          # allow manual run if needed
+    - cron: "*/10 * * * *"  # every 10 minutes
 
 jobs:
-  handle-issue:
+  fork-student-repo:
     if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
       - name: Install GitHub CLI
         run: sudo apt-get install -y gh jq
 
       - name: Authenticate gh CLI
         run: echo "${{ secrets.ORG_PAT }}" | gh auth login --with-token
 
-      - name: Parse repo link from issue
-        id: parse
+      - name: Extract repo link from issue
+        id: extract
         run: |
           body="${{ github.event.issue.body }}"
-          echo "Issue body: $body"
-          repo_url=$(echo "$body" | grep -o 'https://github.com[^ ]*' | head -n1)
+          repo_url=$(echo "$body" | grep -o 'https://github.com[^ ]*' | head -n 1)
           if [ -z "$repo_url" ]; then
-            echo "❌ No repo URL found in issue body"
+            echo "❌ No GitHub repo link found in issue."
             exit 1
           fi
-          echo "repo_url=$repo_url" >> $GITHUB_ENV
+          echo "repo_url=$repo_url" >> $GITHUB_OUTPUT
 
       - name: Fork repo into org
         run: |
-          echo "Forking $repo_url into ncas-eduhub..."
-          gh repo fork "$repo_url" --org ncas-eduhub --clone=false --default-branch-only
+          repo_url="${{ steps.extract.outputs.repo_url }}"
+          echo "🔄 Forking $repo_url into org ncas-eduhub..."
+          gh repo fork "$repo_url" --org ncas-eduhub --clone=false || echo "⚠️ Already forked"
 
   sync-forks:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -50,9 +47,9 @@ jobs:
 
       - name: Sync all forks in org
         run: |
-          echo "Fetching all repos under org ncas-eduhub..."
-          repos=$(gh repo list ncas-eduhub --json name --jq '.[].name')
+          echo "Fetching forks in org ncas-eduhub..."
+          repos=$(gh repo list ncas-eduhub --json name,isFork --jq '.[] | select(.isFork==true) | .name')
           for repo in $repos; do
-            echo "🔄 Syncing ncas-eduhub/$repo..."
+            echo "🔄 Syncing fork: ncas-eduhub/$repo..."
             gh repo sync ncas-eduhub/$repo || echo "⚠️ Failed to sync $repo"
           done
