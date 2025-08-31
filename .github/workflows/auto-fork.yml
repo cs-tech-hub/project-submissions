@@ -12,25 +12,28 @@ on:
 
   # Runs on a schedule
   schedule:
-    - cron: "*/10 * * * *" # Runs every 10 minutes
+    # Runs at the fastest possible interval on GitHub: every 5 minutes
+    - cron: "*/5 * * * *"
 
-# Best practice: Define permissions for the GITHUB_TOKEN to ensure the workflow has only the necessary access.
 permissions:
   contents: write # Required to create forks
   issues: write   # Required to comment on issues
 
 jobs:
   # JOB 1: Process a new issue to fork a repository
-  # This job runs ONLY when an issue is created.
   process_issue:
     name: Fork Repo From Issue
     if: github.event_name == 'issues' # Condition to run only for the 'issues' event
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # Safety timeout to prevent stuck jobs
     steps:
+      - name: ⏱️ Wait for 1 Minute
+        run: sleep 60
+        shell: bash
+
       - name: 🔎 Extract Repo URL from Issue
         id: extract
         run: |
-          # Use a more robust regex to find GitHub URLs, including those in markdown format
           repo_url=$(echo "${{ github.event.issue.body }}" | grep -oP 'https://github\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+' | head -n 1)
           if [[ -z "$repo_url" ]]; then
             echo "URL not found"
@@ -38,54 +41,56 @@ jobs:
           else
             echo "Found URL: $repo_url"
             echo "repo_url=$repo_url" >> $GITHUB_OUTPUT
+            echo "repo_name=$(basename $repo_url)" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: 🍽️ Fork Repository
-        if: steps.extract.outputs.found == 'true' # Run only if a URL was found
+      - name: 🍽️ Fork Repository If It Does Not Exist
+        if: steps.extract.outputs.found == 'true'
         env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }} # Authenticate GitHub CLI using the recommended env variable
+          GH_TOKEN: ${{ secrets.ORG_PAT }}
         run: |
           repo_url="${{ steps.extract.outputs.repo_url }}"
-          echo "🔄 Attempting to fork $repo_url into the 'ncas-eduhub' organization..."
-          gh repo fork "$repo_url" --org ncas-eduhub --clone=false
-          echo "✅ Fork command executed for $repo_url."
+          repo_name="${{ steps.extract.outputs.repo_name }}"
+          org_name="ncas-eduhub"
+          # First, check if the fork already exists in the organization
+          if gh repo view "$org_name/$repo_name" >/dev/null 2>&1; then
+            echo "✅ Fork for $repo_name already exists in $org_name. No action needed."
+            echo "comment_body=✅ **Action Complete!** The repository [${repo_name}]($repo_url) has already been forked into our organization." >> $GITHUB_ENV
+          else
+            echo "🔄 Fork does not exist. Attempting to fork $repo_url into $org_name..."
+            gh repo fork "$repo_url" --org "$org_name" --clone=false
+            echo "comment_body=✅ **Success!** I have successfully forked [${repo_name}]($repo_url) into our organization." >> $GITHUB_ENV
+          fi
 
-      - name: 💬 Add Success Comment to Issue
-        if: success() && steps.extract.outputs.found == 'true' # If previous steps succeeded and URL was found
+      - name: 💬 Add Comment to Issue
+        if: always() # This step runs even if the fork step is skipped
         env:
           GH_TOKEN: ${{ secrets.ORG_PAT }}
         run: |
-          gh issue comment ${{ github.event.issue.number }} --body "✅ **Success!** I have successfully forked ${{ steps.extract.outputs.repo_url }} into our organization."
-
-      - name: ❌ Add Failure Comment to Issue
-        if: failure() || steps.extract.outputs.found == 'false' # If any step failed OR if no URL was found
-        env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }}
-        run: |
-          gh issue comment ${{ github.event.issue.number }} --body "⚠️ **Action Required!** I could not process your request. Please ensure your issue contains a single, valid GitHub repository URL (e.g., \`https://github.com/user/repo\`)."
+          if [[ "${{ steps.extract.outputs.found }}" == "true" ]]; then
+            gh issue comment ${{ github.event.issue.number }} --body "${{ env.comment_body }}"
+          else
+            gh issue comment ${{ github.event.issue.number }} --body "⚠️ **Action Required!** I could not find a valid GitHub repository URL in your issue."
+          fi
 
   # JOB 2: Sync all existing forks
-  # This job runs ONLY on a schedule or manual dispatch.
   sync_forks:
     name: Sync All Organization Forks
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' # Condition for schedule/manual triggers
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # Prevent multiple sync jobs from running simultaneously if one takes longer than 10 minutes
+    timeout-minutes: 15 # A longer timeout for syncing multiple repos
     concurrency:
       group: sync-all-forks
       cancel-in-progress: true
-
     steps:
       - name: 🔄 Sync All Forks in Organization
         env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }} # Authenticate GitHub CLI
+          GH_TOKEN: ${{ secrets.ORG_PAT }}
         run: |
           echo "Fetching list of forked repositories in 'ncas-eduhub'..."
-          # A more robust loop to handle repository names
           gh repo list ncas-eduhub --fork --limit 1000 --json "nameWithOwner" --jq '.[].nameWithOwner' | while read -r repo; do
             echo "Syncing '$repo'..."
-            # The 'sync' command will fail gracefully if the repo is already up-to-date
             gh repo sync "$repo" || echo "⚠️ Could not sync '$repo'. It might be ahead of its parent."
           done
           echo "✅ Fork synchronization complete."
