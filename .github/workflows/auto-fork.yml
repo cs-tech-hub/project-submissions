@@ -3,53 +3,63 @@ name: Auto Fork Student Repos
 on:
   issues:
     types: [opened]
-  workflow_dispatch:
-  schedule:
-    - cron: "*/10 * * * *"  # every 10 minutes
 
 jobs:
-  fork-student-repo:
-    if: github.event_name == 'issues'
+  auto-fork:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Install GitHub CLI
-        run: sudo apt-get install -y gh jq
+      - name: Check out repo
+        uses: actions/checkout@v3
 
-      - name: Authenticate gh CLI
-        run: echo "${{ secrets.ORG_PAT }}" | gh auth login --with-token
-
-      - name: Extract repo link from issue
+      - name: Extract repo URL from issue
         id: extract
         run: |
-          body="${{ github.event.issue.body }}"
-          repo_url=$(echo "$body" | grep -o 'https://github.com[^ ]*' | head -n 1)
-          if [ -z "$repo_url" ]; then
-            echo "❌ No GitHub repo link found in issue."
+          echo "Issue body:"
+          echo "${{ github.event.issue.body }}"
+          # Extract GitHub repo URL from the issue body
+          REPO_URL=$(echo "${{ github.event.issue.body }}" | grep -o 'https://github.com[^ ]*' | head -n 1)
+          if [ -z "$REPO_URL" ]; then
+            echo "No repo URL found in issue body. Please include a GitHub repo link."
             exit 1
           fi
-          echo "repo_url=$repo_url" >> $GITHUB_OUTPUT
+          echo "repo_url=$REPO_URL" >> $GITHUB_OUTPUT
 
       - name: Fork repo into org
+        env:
+          ORG: ncas-eduhub   # your org name
+          REPO_URL: ${{ steps.extract.outputs.repo_url }}
+          GITHUB_TOKEN: ${{ secrets.ORG_PAT }}
         run: |
-          repo_url="${{ steps.extract.outputs.repo_url }}"
-          echo "🔄 Forking $repo_url into org ncas-eduhub..."
-          gh repo fork "$repo_url" --org ncas-eduhub --clone=false || echo "⚠️ Already forked"
+          echo "Forking repo: $REPO_URL into org: $ORG"
 
-  sync-forks:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install GitHub CLI
-        run: sudo apt-get install -y gh jq
+          # Extract owner and repo name
+          OWNER=$(echo "$REPO_URL" | cut -d'/' -f4)
+          REPO=$(echo "$REPO_URL" | cut -d'/' -f5)
 
-      - name: Authenticate gh CLI
-        run: echo "${{ secrets.ORG_PAT }}" | gh auth login --with-token
+          if [ -z "$OWNER" ] || [ -z "$REPO" ]; then
+            echo "Invalid repo URL format: $REPO_URL"
+            exit 1
+          fi
 
-      - name: Sync all forks in org
-        run: |
-          echo "Fetching forks in org ncas-eduhub..."
-          repos=$(gh repo list ncas-eduhub --json name,isFork --jq '.[] | select(.isFork==true) | .name')
-          for repo in $repos; do
-            echo "🔄 Syncing fork: ncas-eduhub/$repo..."
-            gh repo sync ncas-eduhub/$repo || echo "⚠️ Failed to sync $repo"
-          done
+          # Fork using GitHub API
+          curl -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/$OWNER/$REPO/forks \
+            -d "{\"organization\":\"$ORG\"}"
+          
+          echo "✅ Repo $OWNER/$REPO forked into $ORG"
+
+      - name: Comment on issue
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue_number = context.issue.number;
+            const repo_url = "${{ steps.extract.outputs.repo_url }}";
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number,
+              body: `✅ The repository has been forked into **ncas-eduhub**!\n\nForked from: ${repo_url}`
+            });
