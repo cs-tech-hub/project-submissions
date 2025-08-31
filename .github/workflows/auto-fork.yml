@@ -1,51 +1,35 @@
-# A more descriptive name for the workflow
 name: Auto Fork and Sync Student Repositories
 
-# Triggers for the workflow
 on:
-  # Runs when a new issue is opened
   issues:
     types: [opened]
-
-  # Allows manual triggering from the Actions tab
   workflow_dispatch:
-
-  # Runs on a schedule
   schedule:
-    # Runs at the fastest possible interval on GitHub: every 5 minutes
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *" # every 10 minutes
 
 permissions:
-  contents: write # Required to create forks
-  issues: write   # Required to comment on issues
+  contents: write
+  issues: write
 
 jobs:
-  # JOB 1: Process a new issue to fork a repository
   process_issue:
     name: Fork Repo From Issue
-    if: github.event_name == 'issues' # Condition to run only for the 'issues' event
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # Safety timeout to prevent stuck jobs
+    if: github.event_name == 'issues'
     steps:
-      - name: ⏱️ Wait for 1 Minute
-        run: sleep 60
-        shell: bash
-
       - name: 🔎 Extract Repo URL from Issue
         id: extract
         run: |
           repo_url=$(echo "${{ github.event.issue.body }}" | grep -oP 'https://github\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+' | head -n 1)
           if [[ -z "$repo_url" ]]; then
-            echo "URL not found"
             echo "found=false" >> $GITHUB_OUTPUT
           else
-            echo "Found URL: $repo_url"
             echo "repo_url=$repo_url" >> $GITHUB_OUTPUT
             echo "repo_name=$(basename $repo_url)" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: 🍽️ Fork Repository If It Does Not Exist
+      - name: 🍽️ Fork Repository
         if: steps.extract.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ secrets.ORG_PAT }}
@@ -53,44 +37,38 @@ jobs:
           repo_url="${{ steps.extract.outputs.repo_url }}"
           repo_name="${{ steps.extract.outputs.repo_name }}"
           org_name="ncas-eduhub"
-          # First, check if the fork already exists in the organization
+
           if gh repo view "$org_name/$repo_name" >/dev/null 2>&1; then
-            echo "✅ Fork for $repo_name already exists in $org_name. No action needed."
-            echo "comment_body=✅ **Action Complete!** The repository [${repo_name}]($repo_url) has already been forked into our organization." >> $GITHUB_ENV
+            echo "comment_body=✅ Repo [$repo_name] already forked." >> $GITHUB_ENV
           else
-            echo "🔄 Fork does not exist. Attempting to fork $repo_url into $org_name..."
             gh repo fork "$repo_url" --org "$org_name" --clone=false
-            echo "comment_body=✅ **Success!** I have successfully forked [${repo_name}]($repo_url) into our organization." >> $GITHUB_ENV
+            echo "comment_body=✅ Forked [$repo_name] into $org_name." >> $GITHUB_ENV
           fi
 
-      - name: 💬 Add Comment to Issue
-        if: always() # This step runs even if the fork step is skipped
+      - name: 💬 Comment on Issue
+        if: steps.extract.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ secrets.ORG_PAT }}
-        run: |
-          if [[ "${{ steps.extract.outputs.found }}" == "true" ]]; then
-            gh issue comment ${{ github.event.issue.number }} --body "${{ env.comment_body }}"
-          else
-            gh issue comment ${{ github.event.issue.number }} --body "⚠️ **Action Required!** I could not find a valid GitHub repository URL in your issue."
-          fi
+        run: gh issue comment ${{ github.event.issue.number }} --body "${{ env.comment_body }}"
 
-  # JOB 2: Sync all existing forks
+      - name: ⚠️ Comment if No URL Found
+        if: steps.extract.outputs.found != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ORG_PAT }}
+        run: gh issue comment ${{ github.event.issue.number }} --body "⚠️ Please include a valid GitHub repo URL."
+
   sync_forks:
     name: Sync All Organization Forks
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # A longer timeout for syncing multiple repos
-    concurrency:
-      group: sync-all-forks
-      cancel-in-progress: true
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - name: 🔄 Sync All Forks in Organization
+      - name: 🔄 Sync All Forks
         env:
           GH_TOKEN: ${{ secrets.ORG_PAT }}
         run: |
-          echo "Fetching list of forked repositories in 'ncas-eduhub'..."
+          echo "Fetching forks in org 'ncas-eduhub'..."
           gh repo list ncas-eduhub --fork --limit 1000 --json "nameWithOwner" --jq '.[].nameWithOwner' | while read -r repo; do
-            echo "Syncing '$repo'..."
-            gh repo sync "$repo" || echo "⚠️ Could not sync '$repo'. It might be ahead of its parent."
+            echo "Syncing $repo..."
+            gh repo sync "$repo" || echo "⚠️ Could not sync $repo (ahead of upstream)."
           done
-          echo "✅ Fork synchronization complete."
+          echo "✅ Sync complete."
