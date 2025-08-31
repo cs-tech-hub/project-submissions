@@ -12,12 +12,15 @@ jobs:
     if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     steps:
+      - name: Authenticate gh CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
       - name: Extract repo link from issue
         id: extract
         run: |
           echo "ISSUE_BODY='${{ github.event.issue.body }}'" >> $GITHUB_ENV
           # Expect repo link like https://github.com/user/repo
-          REPO_URL=$(echo "${{ github.event.issue.body }}" | grep -oE 'https://github.com/[^ ]+')
+          REPO_URL=$(echo "${{ github.event.issue.body }}" | grep -oE 'https://github.com/[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+')
           if [ -z "$REPO_URL" ]; then
             echo "No valid GitHub repo link found in issue body"
             exit 1
@@ -30,25 +33,24 @@ jobs:
 
       - name: Fork into org
         run: |
-          echo "Forking $SRC_OWNER/$SRC_REPO into org..."
-          gh repo fork $SRC_OWNER/$SRC_REPO --org ncas-eduhub --remote=false --clone=false
+          echo "Forking $SRC_OWNER/$SRC_REPO into org ncas-eduhub..."
+          gh repo fork $SRC_OWNER/$SRC_REPO --org ncas-eduhub --remote=false --clone=false --default-branch-only
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRC_OWNER: ${{ env.SRC_OWNER }}
+          SRC_REPO: ${{ env.SRC_REPO }}
 
   sync-repos:
     if: github.event_name != 'issues'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Authenticate gh CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
       - name: Sync all student repos
         run: |
-          echo "Fetching all repos under org..."
-          gh repo list YOUR_ORG_NAME --limit 200 --json nameWithOwner -q '.[].nameWithOwner' > repos.txt
+          echo "Fetching all repos under org ncas-eduhub..."
+          gh repo list ncas-eduhub --limit 200 --json nameWithOwner -q '.[].nameWithOwner' > repos.txt
           while IFS= read -r repo; do
             echo "Syncing $repo..."
             gh repo sync "$repo"
           done < repos.txt
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
