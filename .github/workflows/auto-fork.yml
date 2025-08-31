@@ -1,129 +1,54 @@
-name: Auto Fork + Install Sync
+name: Auto Fork Student Repos
 
 on:
   issues:
-    types: [opened]
-
-permissions:
-  issues: write
-  contents: write
-
-env:
-  ORG: "your-org-name"           # <-- REPLACE with your org name
-  SYNC_CRON: "*/10 * * * *"      # every 10 minutes
-
-jobs:
-  auto_fork_and_setup_sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Extract repo URL from issue body
-        id: parse
-        run: |
-          set -e
-          BODY="${{ github.event.issue.body }}"
-          # Extract first matching GitHub repo URL
-          REPO_URL=$(echo "$BODY" | grep -Eo 'https?://github\.com/[^/ )]+/[^/ )]+' | head -n1) || true
-          REPO_URL=${REPO_URL:-}
-          echo "repo_url=$REPO_URL" >> $GITHUB_OUTPUT
-
-      - name: Fail nicely if no URL found
-        if: steps.parse.outputs.repo_url == ''
-        run: |
-          COMMENT_URL="https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
-          BODY_JSON=$(jq -nc --arg b "❌ No valid GitHub repo URL found. Paste like https://github.com/username/repo" '{body:$b}')
-          curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "$COMMENT_URL" -d "$BODY_JSON"
-          echo "No repo URL found. Comment posted."
-        shell: bash
-
-      - name: Fork repo into org (if not exists) and wait for fork
-        if: steps.parse.outputs.repo_url != ''
-        env:
-          ORG: ${{ env.ORG }}
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
-        run: |
-          set -euo pipefail
-          SRC_URL="${{ steps.parse.outputs.repo_url }}"
-          SRC_OWNER=$(echo "$SRC_URL" | sed -E 's#https?://github.com/([^/]+)/([^/]+).*#\1#')
-          SRC_REPO=$(echo "$SRC_URL" | sed -E 's#https?://github.com/([^/]+)/([^/]+).*#\2#')
-          echo "Source repo: $SRC_OWNER/$SRC_REPO"
-
-          # Check if org already has the repo
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $ORG_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${ORG}/${SRC_REPO}")
-          if [ "$HTTP" = "200" ]; then
-            echo "Repo ${ORG}/${SRC_REPO} already exists in org."
-          else
-            echo "Forking ${SRC_OWNER}/${SRC_REPO} into ${ORG}..."
-            curl -s -X POST -H "Authorization: token $ORG_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${SRC_OWNER}/${SRC_REPO}/forks" -d "{\"organization\":\"${ORG}\"}"
-            # Wait for fork to appear (retry)
-            for i in $(seq 1 30); do
-              status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $ORG_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${ORG}/${SRC_REPO}")
-              if [ "$status" = "200" ]; then
-                echo "Fork is available."
-                break
-              fi
-              echo "Waiting for fork... ($i)"
-              sleep 4
-            done
-          fi
-
-      - name: Add sync workflow to the fork (create or update)
-        if: steps.parse.outputs.repo_url != ''
-        env:
-          ORG: ${{ env.ORG }}
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
-          SYNC_CRON: ${{ env.SYNC_CRON }}
-          GITHUB_API_ACCEPT: "application/vnd.github+json"
-        run: |
-          set -euo pipefail
-          SRC_URL="${{ steps.parse.outputs.repo_url }}"
-          SRC_OWNER=$(echo "$SRC_URL" | sed -E 's#https?://github.com/([^/]+)/([^/]+).*#\1#')
-          SRC_REPO=$(echo "$SRC_URL" | sed -E 's#https?://github.com/([^/]+)/([^/]+).*#\2#')
-
-          # get default branch of upstream (fallback to main)
-          DEFAULT_BRANCH=$(curl -s -H "Accept: $GITHUB_API_ACCEPT" "https://api.github.com/repos/${SRC_OWNER}/${SRC_REPO}" | jq -r '.default_branch // "main"')
-
-          # Build sync workflow file content (we escape the secret placeholder so it's written literally into the file)
-          cat > sync.yml <<EOF
-name: Sync Fork
-on:
+    types: [opened, edited]   # runs when a student submits/edits repo link
   schedule:
-    - cron: '${SYNC_CRON}'
-  workflow_dispatch:
+    - cron: "*/10 * * * *"    # also runs every 10 minutes to sync all repos
+  workflow_dispatch:           # allow manual run
 
 jobs:
-  sync:
+  handle-issue:
+    if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     steps:
-      - uses: repo-sync/github-sync@v2
-        with:
-          source_repo: ${SRC_OWNER}/${SRC_REPO}
-          source_branch: ${DEFAULT_BRANCH}
-          destination_branch: ${DEFAULT_BRANCH}
-          github_token: \${{ secrets.ORG_TOKEN }}
-EOF
-
-          CONTENT_BASE64=$(base64 -w 0 sync.yml)
-
-          # Check if file exists in fork to get sha
-          FILE_API="https://api.github.com/repos/${ORG}/${SRC_REPO}/contents/.github/workflows/sync.yml"
-          RESP=$(curl -s -H "Authorization: token ${ORG_TOKEN}" -H "Accept: $GITHUB_API_ACCEPT" "$FILE_API")
-          SHA=$(echo "$RESP" | jq -r '.sha // empty')
-
-          if [ -z "$SHA" ]; then
-            PAYLOAD=$(jq -n --arg m "chore: add sync workflow" --arg c "$CONTENT_BASE64" '{message:$m, content:$c}')
-          else
-            PAYLOAD=$(jq -n --arg m "chore: update sync workflow" --arg c "$CONTENT_BASE64" --arg s "$SHA" '{message:$m, content:$c, sha:$s}')
-          fi
-
-          # Put file (create or update)
-          curl -s -X PUT -H "Authorization: token ${ORG_TOKEN}" -H "Accept: $GITHUB_API_ACCEPT" "$FILE_API" -d "$PAYLOAD" | jq -r '.commit.html_url // .content.html_url // "done"'
-
-      - name: Comment success on the submission issue
-        if: steps.parse.outputs.repo_url != ''
+      - name: Extract repo link from issue
+        id: extract
         run: |
-          SRC_URL="${{ steps.parse.outputs.repo_url }}"
-          SRC_REPO=$(echo "$SRC_URL" | sed -E 's#https?://github.com/([^/]+)/([^/]+).*#\2#')
-          COMMENT_URL="https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
-          BODY_TEXT="🎉 Fork available (or ensured). Your project should be at https://github.com/${{ env.ORG }}/${SRC_REPO} and will auto-sync every 10 minutes."
-          BODY_JSON=$(jq -nc --arg b "$BODY_TEXT" '{body:$b}')
-          curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/vnd.github+json" "$COMMENT_URL" -d "$BODY_JSON"
+          echo "ISSUE_BODY='${{ github.event.issue.body }}'" >> $GITHUB_ENV
+          # Expect repo link like https://github.com/user/repo
+          REPO_URL=$(echo "${{ github.event.issue.body }}" | grep -oE 'https://github.com/[^ ]+')
+          if [ -z "$REPO_URL" ]; then
+            echo "No valid GitHub repo link found in issue body"
+            exit 1
+          fi
+          echo "REPO_URL=$REPO_URL" >> $GITHUB_ENV
+          OWNER=$(echo $REPO_URL | cut -d'/' -f4)
+          REPO=$(echo $REPO_URL | cut -d'/' -f5)
+          echo "SRC_OWNER=$OWNER" >> $GITHUB_ENV
+          echo "SRC_REPO=$REPO" >> $GITHUB_ENV
+
+      - name: Fork into org
+        run: |
+          echo "Forking $SRC_OWNER/$SRC_REPO into org..."
+          gh repo fork $SRC_OWNER/$SRC_REPO --org ncas-eduhub --remote=false --clone=false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sync-repos:
+    if: github.event_name != 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync all student repos
+        run: |
+          echo "Fetching all repos under org..."
+          gh repo list YOUR_ORG_NAME --limit 200 --json nameWithOwner -q '.[].nameWithOwner' > repos.txt
+          while IFS= read -r repo; do
+            echo "Syncing $repo..."
+            gh repo sync "$repo"
+          done < repos.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
