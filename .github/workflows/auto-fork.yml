@@ -99,7 +99,7 @@ jobs:
           source_repo: ${SRC_OWNER}/${SRC_REPO}
           source_branch: ${DEFAULT_BRANCH}
           destination_branch: ${DEFAULT_BRANCH}
-          github_token: \${{ secrets.GITHUB_TOKEN }}
+          github_token: \${{ secrets.ORG_TOKEN }}
 EOF
 
           CONTENT_BASE64=$(base64 -w 0 sync.yml)
