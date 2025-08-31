@@ -1,0 +1,164 @@
+name: Auto Fork + Install Sync
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: write
+  metadata: read
+  administration: write
+
+env:
+  ORG: "ncas-eduhub"   # <-- REPLACE with your Org name
+  SYNC_CRON: "*/10 * * * *"     # every 10 minutes
+
+jobs:
+  auto_fork_and_setup_sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract first GitHub repo URL from issue body
+        id: parse
+        run: |
+          BODY="${{ github.event.issue.body }}"
+          REPO_URL=$(echo "$BODY" | grep -Eo 'https?://github\.com/[^/ )]+/[^/ )]+' | head -n1 || true)
+          echo "repo_url=$REPO_URL" >> $GITHUB_OUTPUT
+
+      - name: Fail nicely if no URL found
+        if: steps.parse.outputs.repo_url == ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "❌ No valid GitHub repo URL found. Paste like `https://github.com/username/repo`."
+            });
+            core.setFailed("No repo URL")
+
+      - name: Fork into org and install sync workflow
+        uses: actions/github-script@v7
+        env:
+          ORG: ${{ env.ORG }}
+          REPO_URL: ${{ steps.parse.outputs.repo_url }}
+          SYNC_CRON: ${{ env.SYNC_CRON }}
+        with:
+          github-token: ${{ secrets.ORG_TOKEN }}
+          script: |
+            const issue_number = context.issue.number;
+            const org = process.env.ORG;
+            const repoUrl = process.env.REPO_URL;
+
+            // Parse https://github.com/<owner>/<repo>
+            const m = repoUrl.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/\s#?]+)(?:\.git)?/i);
+            if (!m) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number,
+                body: "❌ Couldn't parse the repo URL. Use `https://github.com/user/repo`."
+              });
+              return;
+            }
+            const srcOwner = m[1];
+            const srcRepo = m[2];
+
+            // Get upstream default branch (fallback main)
+            let defaultBranch = "main";
+            try {
+              const r = await github.rest.repos.get({ owner: srcOwner, repo: srcRepo });
+              defaultBranch = r.data.default_branch || "main";
+            } catch (e) {
+              // Public repos should work; ignore if rate limited
+            }
+
+            // Does org fork already exist?
+            let exists = false;
+            try {
+              await github.rest.repos.get({ owner: org, repo: srcRepo });
+              exists = true;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            if (!exists) {
+              // Fork into org (body param is 'organization')
+              await github.request('POST /repos/{owner}/{repo}/forks', {
+                owner: srcOwner,
+                repo: srcRepo,
+                organization: org
+              });
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number,
+                body: `✅ Fork requested: \`${srcOwner}/${srcRepo}\` → \`${org}/${srcRepo}\`. Setting up auto-sync...`
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number,
+                body: `ℹ️ \`${org}/${srcRepo}\` already exists. Updating/ensuring sync workflow...`
+              });
+            }
+
+            // Wait until fork is available
+            let tries = 0;
+            while (tries < 30) { // up to ~2 minutes
+              try {
+                await github.rest.repos.get({ owner: org, repo: srcRepo });
+                break;
+              } catch (e) {
+                if (e.status === 404) {
+                  await new Promise(r => setTimeout(r, 4000));
+                  tries++;
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            // Build sync workflow content (runs every 10 min)
+            const path = '.github/workflows/sync.yml';
+            const content = `
+name: Sync Fork
+on:
+  schedule:
+    - cron: '${process.env.SYNC_CRON}'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: repo-sync/github-sync@v2
+        with:
+          source_repo: ${srcOwner}/${srcRepo}
+          source_branch: ${defaultBranch}
+          destination_branch: ${defaultBranch}
+          github_token: \${{ secrets.GITHUB_TOKEN }}
+`.trim();
+
+            const b64 = Buffer.from(content, 'utf8').toString('base64');
+
+            // Create or update the workflow file in the fork
+            let sha;
+            try {
+              const { data } = await github.rest.repos.getContent({ owner: org, repo: srcRepo, path });
+              if (!Array.isArray(data)) sha = data.sha;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: org,
+              repo: srcRepo,
+              path,
+              message: sha ? "chore: update sync workflow" : "chore: add sync workflow",
+              content: b64,
+              sha
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number,
+              body: `🎉 All set! Your project is now at https://github.com/${org}/${srcRepo}\n\nIt will auto-sync from \`${srcOwner}/${srcRepo}\` every **10 minutes**.`
+            });
