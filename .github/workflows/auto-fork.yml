@@ -1,74 +1,42 @@
-name: Auto Fork and Sync Student Repositories
+name: Auto Fork Student Repos
 
 on:
-  issues:
-    types: [opened]
-  workflow_dispatch:
-  schedule:
-    - cron: "*/10 * * * *" # every 10 minutes
-
-permissions:
-  contents: write
-  issues: write
+  push:
+    paths:
+      - "repos.txt"   # only trigger when repos.txt changes
+  workflow_dispatch:   # also allow manual run
 
 jobs:
-  process_issue:
-    name: Fork Repo From Issue
+  fork-repos:
     runs-on: ubuntu-latest
-    if: github.event_name == 'issues'
     steps:
-      - name: 🔎 Extract Repo URL from Issue
-        id: extract
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Install GitHub CLI
+        run: sudo apt-get install -y gh jq
+
+      - name: Authenticate gh CLI
+        run: echo "${{ secrets.ORG_PAT }}" | gh auth login --with-token
+
+      - name: Fork repos into org (safe mode)
         run: |
-          repo_url=$(echo "${{ github.event.issue.body }}" | grep -oP 'https://github\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+' | head -n 1)
-          if [[ -z "$repo_url" ]]; then
-            echo "found=false" >> $GITHUB_OUTPUT
-          else
-            echo "repo_url=$repo_url" >> $GITHUB_OUTPUT
-            echo "repo_name=$(basename $repo_url)" >> $GITHUB_OUTPUT
-            echo "found=true" >> $GITHUB_OUTPUT
-          fi
+          ORG="ncas-eduhub"
 
-      - name: 🍽️ Fork Repository
-        if: steps.extract.outputs.found == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }}
-        run: |
-          repo_url="${{ steps.extract.outputs.repo_url }}"
-          repo_name="${{ steps.extract.outputs.repo_name }}"
-          org_name="ncas-eduhub"
+          # Read repos from repos.txt
+          while IFS= read -r repo_url; do
+            [ -z "$repo_url" ] && continue   # skip empty lines
+            repo_name=$(basename "$repo_url" .git)
 
-          if gh repo view "$org_name/$repo_name" >/dev/null 2>&1; then
-            echo "comment_body=✅ Repo [$repo_name] already forked." >> $GITHUB_ENV
-          else
-            gh repo fork "$repo_url" --org "$org_name" --clone=false
-            echo "comment_body=✅ Forked [$repo_name] into $org_name." >> $GITHUB_ENV
-          fi
+            echo "🔍 Checking $repo_url..."
 
-      - name: 💬 Comment on Issue
-        if: steps.extract.outputs.found == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }}
-        run: gh issue comment ${{ github.event.issue.number }} --body "${{ env.comment_body }}"
+            # Check if repo already exists in org
+            if gh repo view "$ORG/$repo_name" >/dev/null 2>&1; then
+              echo "✅ Already exists in org: $ORG/$repo_name (skip)"
+            else
+              echo "🔄 Forking $repo_url into $ORG..."
+              gh repo fork "$repo_url" --org "$ORG" --clone=false || echo "⚠️ Failed to fork $repo_url"
+            fi
+          done < repos.txt
 
-      - name: ⚠️ Comment if No URL Found
-        if: steps.extract.outputs.found != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }}
-        run: gh issue comment ${{ github.event.issue.number }} --body "⚠️ Please include a valid GitHub repo URL."
-
-  sync_forks:
-    name: Sync All Organization Forks
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    steps:
-      - name: 🔄 Sync All Forks
-        env:
-          GH_TOKEN: ${{ secrets.ORG_PAT }}
-        run: |
-          echo "Fetching forks in org 'ncas-eduhub'..."
-          gh repo list ncas-eduhub --fork --limit 1000 --json "nameWithOwner" --jq '.[].nameWithOwner' | while read -r repo; do
-            echo "Syncing $repo..."
-            gh repo sync "$repo" || echo "⚠️ Could not sync $repo (ahead of upstream)."
-          done
-          echo "✅ Sync complete."
+          echo "🎉 Forking process completed. Note: Existing forks are never deleted."
