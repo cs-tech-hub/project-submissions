@@ -1,0 +1,27 @@
+name: Student Project Submission
+description: Paste your GitHub repository URL to auto-submit.
+title: "Submission: <Your Name> - <Roll No>"
+labels: ["submission"]
+body:
+  - type: input
+    id: repo_url
+    attributes:
+      label: Public GitHub repo URL (required)
+      description: Paste exactly like https://github.com/username/repo
+      placeholder: https://github.com/username/repo
+    validations:
+      required: true
+  - type: input
+    id: branch
+    attributes:
+      label: Branch name (optional, default = upstream default)
+      placeholder: main
+  - type: input
+    id: github_username
+    attributes:
+      label: Your GitHub username (optional)
+      placeholder: yourusername
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes (optional)
