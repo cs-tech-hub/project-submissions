@@ -1,5 +1,2 @@
 enter the links for your repo
-https://github.com/sree-hari-v/test-for-eduhub
-https://github.com/sree-hari-v/edu-nex
 https://github.com/codewith-lionel/AcademicPerformanceAnalyzer
-https://github.com/codewith-lionel/Department-management
